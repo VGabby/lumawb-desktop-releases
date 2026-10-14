@@ -52,13 +52,15 @@ jobs:
       - name: Validate, test, and build without exposing compiler output
         shell: pwsh
         run: node scripts/build-windows.mjs
-      - name: Upload installers and checksums only
+      - name: Upload installers and checksums, or encrypted failure diagnostics
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lumawb-desktop-win32-x64-${{ inputs.source_commit }}
           path: installer-artifacts/
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 1
 
 # This public repository contains only build orchestration. There are no push/PR
-# triggers, secrets in files, source/log uploads, publication, or signing jobs.
+# triggers, secrets in files, source or plaintext log uploads, publication, or
+# signing jobs. Failed builds upload only an RSA/AES-encrypted diagnostics file.

@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // Public orchestration only. Private compiler output stays on the ephemeral VM.
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { constants, createCipheriv, createHash, createPublicKey, publicEncrypt, randomBytes } from 'node:crypto';
 import { closeSync, openSync } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { deflateSync } from 'node:zlib';
 
 const root = process.cwd();
 const desktop = join(root, 'private-source', 'desktop');
 const output = join(root, 'installer-artifacts');
+const diagnosticsKey = join(root, 'diagnostics-public.pem');
 const target = 'x86_64-pc-windows-msvc';
 const logs = await mkdtemp(join(tmpdir(), 'lumawb-private-build-'));
 let phase = 'initialization';
@@ -26,6 +28,44 @@ function run(name, executable, args, options = {}) {
   }
   if (result.error || result.status !== 0) throw new Error('private command failed');
   console.log(`Passed: ${name}`);
+}
+
+// Encrypts the captured build logs for the publisher's offline private key.
+// Only the RSA public key is available here; nothing readable is written.
+async function writeEncryptedDiagnostics(failedPhase) {
+  const pem = await readFile(diagnosticsKey, 'utf8');
+  if (/PRIVATE KEY/.test(pem)) throw new Error('diagnostics key must be public');
+  const recipient = createPublicKey(pem);
+  if (recipient.type !== 'public' || recipient.asymmetricKeyType !== 'rsa') throw new Error('diagnostics key must be RSA public');
+
+  const captured = {};
+  for (const entry of await readdir(logs, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith('.log')) captured[entry.name] = await readFile(join(logs, entry.name), 'utf8');
+  }
+  const plaintext = deflateSync(Buffer.from(JSON.stringify({ version: 1, phase: failedPhase, logs: captured }), 'utf8'));
+
+  const key = randomBytes(32);
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, nonce);
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const encryptedKey = publicEncrypt({ key: recipient, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, key);
+  key.fill(0);
+
+  const envelope = {
+    version: 1,
+    format: 'lumawb-build-diagnostics',
+    compression: 'zlib-deflate',
+    content: 'json',
+    cipher: 'AES-256-GCM',
+    keyEncryption: 'RSA-OAEP-SHA256',
+    encryptedKey: encryptedKey.toString('base64'),
+    nonce: nonce.toString('base64'),
+    tag: tag.toString('base64'),
+    ciphertext: ciphertext.toString('base64'),
+  };
+  await mkdir(output, { recursive: true });
+  await writeFile(join(output, 'build-diagnostics.enc.json'), `${JSON.stringify(envelope)}\n`);
 }
 
 try {
@@ -71,7 +111,14 @@ try {
   console.log(`Passed: ${phase}; ${installers.length} installer(s), checksums only.`);
 } catch {
   await rm(output, { recursive: true, force: true });
-  console.error(`Build failed during: ${phase}. Raw output remains private on the ephemeral runner; no source or logs are uploaded.`);
+  console.error(`Build failed during: ${phase}.`);
+  try {
+    await writeEncryptedDiagnostics(phase);
+    console.error('Encrypted diagnostics written; readable only with the publisher\'s offline private key.');
+  } catch {
+    await rm(output, { recursive: true, force: true });
+    console.error('Encrypted diagnostics could not be created.');
+  }
   process.exitCode = 1;
 } finally {
   await rm(logs, { recursive: true, force: true });
