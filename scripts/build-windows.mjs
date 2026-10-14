@@ -13,6 +13,9 @@ const desktop = join(root, 'private-source', 'desktop');
 const output = join(root, 'installer-artifacts');
 const diagnosticsKey = join(root, 'diagnostics-public.pem');
 const target = 'x86_64-pc-windows-msvc';
+// MSBuild's file tracker still hits MAX_PATH in deep Cargo/CMake directories.
+const targetRoot = join(process.env.RUNNER_TEMP || tmpdir(), 'lt');
+process.env.CARGO_TARGET_DIR = targetRoot;
 const logs = await mkdtemp(join(tmpdir(), 'lumawb-private-build-'));
 let phase = 'initialization';
 
@@ -82,7 +85,7 @@ try {
   run('Core tests', 'cargo', ['test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features', '--target', target]);
   run('Python reference parity', 'cargo', ['test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features', '--target', target, '--test', 'core_parity', '--', '--ignored']);
   run('Build real HTTP API', 'cargo', ['build', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features', '--bin', 'lumawb-api', '--target', target]);
-  run('Offline HTTP integration', process.execPath, ['scripts/http-smoke.mjs', '--binary', `src-tauri/target/${target}/debug/lumawb-api.exe`]);
+  run('Offline HTTP integration', process.execPath, ['scripts/http-smoke.mjs', '--binary', join(targetRoot, target, 'debug', 'lumawb-api.exe')]);
   run('Build Windows installer', process.execPath, ['scripts/build-release.mjs', '--target', target]);
 
   phase = 'Validate installer artifacts';
