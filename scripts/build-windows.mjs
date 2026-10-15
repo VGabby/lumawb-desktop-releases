@@ -86,6 +86,20 @@ try {
   run('Python reference parity', 'cargo', ['test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features', '--target', target, '--test', 'core_parity', '--', '--ignored']);
   run('Build real HTTP API', 'cargo', ['build', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features', '--bin', 'lumawb-api', '--target', target]);
   run('Offline HTTP integration', process.execPath, ['scripts/http-smoke.mjs', '--binary', join(targetRoot, target, 'debug', 'lumawb-api.exe')]);
+  {
+    // Report the runner's accelerator result; this prints only JSON status.
+    phase = 'Accelerator check';
+    const api = join(targetRoot, target, 'debug', 'lumawb-api.exe');
+    const runtime = join(desktop, 'src-tauri', 'resources', 'native', 'win32-x64', 'onnxruntime.dll');
+    const resources = join(desktop, 'src-tauri', 'resources');
+    for (const extra of [[], ['--include-software-adapter']]) {
+      const detect = spawnSync(api, ['--detect-accelerator', ...extra], { encoding: 'utf8', windowsHide: true });
+      console.log(`Accelerator detection ${extra.join(' ') || '(hardware only)'}: ${(detect.stdout || '').trim() || 'failed'}`);
+    }
+    const probe = spawnSync(api, ['--probe-accelerator', '--include-software-adapter', '--resources', resources, '--runtime', runtime, '--threads', '2'], { encoding: 'utf8', windowsHide: true, timeout: 15 * 60 * 1000 });
+    const line = (probe.stdout || '').trim().split(/\r?\n/).pop() || '';
+    console.log(`DirectML check on the runner's software adapter: ${/^\{.*\}$/.test(line) ? line : 'no result (exit ' + probe.status + ')'}`);
+  }
   run('Build Windows installer', process.execPath, ['scripts/build-release.mjs', '--target', target]);
 
   phase = 'Validate installer artifacts';
