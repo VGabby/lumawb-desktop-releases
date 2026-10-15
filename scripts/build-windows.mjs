@@ -96,9 +96,9 @@ try {
       const detect = spawnSync(api, ['--detect-accelerator', ...extra], { encoding: 'utf8', windowsHide: true });
       console.log(`Accelerator detection ${extra.join(' ') || '(hardware only)'}: ${(detect.stdout || '').trim() || 'failed'}`);
     }
-    const probe = spawnSync(api, ['--probe-accelerator', '--include-software-adapter', '--resources', resources, '--runtime', runtime, '--threads', '2'], { encoding: 'utf8', windowsHide: true, timeout: 15 * 60 * 1000 });
+    const probe = spawnSync(api, ['--try-accelerator', '--include-software-adapter', '--resources', resources, '--runtime', runtime, '--threads', '2'], { encoding: 'utf8', windowsHide: true, timeout: 15 * 60 * 1000 });
     const line = (probe.stdout || '').trim().split(/\r?\n/).pop() || '';
-    console.log(`DirectML check on the runner's software adapter: ${/^\{.*\}$/.test(line) ? line : 'no result (exit ' + probe.status + ')'}`);
+    console.log(`DirectML load on the runner's software adapter: ${/^\{.*\}$/.test(line) ? line : 'no result (exit ' + probe.status + ')'}`);
   }
   run('Build Windows installer', process.execPath, ['scripts/build-release.mjs', '--target', target]);
 
