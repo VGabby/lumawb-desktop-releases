@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Public orchestration only. Private compiler output stays on the ephemeral VM.
+// Builds the Windows x64 or Apple Silicon installer and its signed update file.
 import { spawnSync } from 'node:child_process';
 import { constants, createCipheriv, createHash, createPublicKey, publicEncrypt, randomBytes } from 'node:crypto';
 import { closeSync, openSync } from 'node:fs';
@@ -12,7 +13,18 @@ const root = process.cwd();
 const desktop = join(root, 'private-source', 'desktop');
 const output = join(root, 'installer-artifacts');
 const diagnosticsKey = join(root, 'diagnostics-public.pem');
-const target = 'x86_64-pc-windows-msvc';
+const windows = process.platform === 'win32';
+const target = windows ? 'x86_64-pc-windows-msvc' : 'aarch64-apple-darwin';
+const platformName = windows ? 'win32-x64' : 'darwin-arm64';
+// The update signing key goes only to the installer build. Dependency
+// installs, tests and diagnostics never see it.
+const signing = {
+  TAURI_SIGNING_PRIVATE_KEY: process.env.TAURI_SIGNING_PRIVATE_KEY || '',
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '',
+};
+delete process.env.TAURI_SIGNING_PRIVATE_KEY;
+delete process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
+const npm = windows ? 'npm.cmd' : 'npm';
 // MSBuild's file tracker still hits MAX_PATH in deep Cargo/CMake directories.
 const targetRoot = join(process.env.RUNNER_TEMP || tmpdir(), 'lt');
 process.env.CARGO_TARGET_DIR = targetRoot;
@@ -72,21 +84,22 @@ async function writeEncryptedDiagnostics(failedPhase) {
 }
 
 try {
-  if (process.platform !== 'win32') throw new Error('Windows runner required');
+  if (!['win32', 'darwin'].includes(process.platform) || (!windows && process.arch !== 'arm64')) throw new Error('Windows x64 or Apple Silicon runner required');
+  if (!signing.TAURI_SIGNING_PRIVATE_KEY || !signing.TAURI_SIGNING_PRIVATE_KEY_PASSWORD) throw new Error('update signing key missing');
   if (!/^[a-f0-9]{40}$/i.test(process.env.LUMAWB_SOURCE_COMMIT || '')) throw new Error('invalid source revision');
   phase = 'Verify checked out revision';
   const revision = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: desktop, encoding: 'utf8', windowsHide: true });
   if (revision.status !== 0 || revision.stdout.trim().toLowerCase() !== process.env.LUMAWB_SOURCE_COMMIT.toLowerCase()) throw new Error('wrong checkout');
   console.log(`Passed: ${phase}`);
   // npm.cmd is a Windows shim; this invocation has fixed, non-interpolated args.
-  run('Install frontend dependencies', 'npm.cmd', ['ci'], { shell: true });
+  run('Install frontend dependencies', npm, ['ci'], { shell: windows });
   run('Prepare checked model and runtime', process.execPath, ['scripts/prepare-runtime.mjs', '--target', target]);
-  run('Build frontend', 'npm.cmd', ['run', 'build'], { shell: true });
+  run('Build frontend', npm, ['run', 'build'], { shell: windows });
   run('Core tests', 'cargo', ['test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features', '--target', target]);
   run('Python reference parity', 'cargo', ['test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features', '--target', target, '--test', 'core_parity', '--', '--ignored']);
   run('Build real HTTP API', 'cargo', ['build', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--no-default-features', '--bin', 'lumawb-api', '--target', target]);
-  run('Offline HTTP integration', process.execPath, ['scripts/http-smoke.mjs', '--binary', join(targetRoot, target, 'debug', 'lumawb-api.exe')]);
-  {
+  run('Offline HTTP integration', process.execPath, ['scripts/http-smoke.mjs', '--binary', join(targetRoot, target, 'debug', windows ? 'lumawb-api.exe' : 'lumawb-api')]);
+  if (windows) {
     // Report the runner's accelerator result; this prints only JSON status.
     phase = 'Accelerator check';
     const api = join(targetRoot, target, 'debug', 'lumawb-api.exe');
@@ -100,32 +113,33 @@ try {
     const line = (probe.stdout || '').trim().split(/\r?\n/).pop() || '';
     console.log(`DirectML load on the runner's software adapter: ${/^\{.*\}$/.test(line) ? line : 'no result (exit ' + probe.status + ')'}`);
   }
-  run('Build Windows installer', process.execPath, ['scripts/build-release.mjs', '--target', target]);
+  run('Build installer and signed update', process.execPath, ['scripts/build-release.mjs', '--target', target], { env: { ...process.env, ...signing } });
 
   phase = 'Validate installer artifacts';
-  const source = join(desktop, 'release-artifacts', 'win32-x64');
-  const names = await readdir(source);
-  const installers = names.filter(name => /^[^\\/]+\.exe$/i.test(name));
-  if (!installers.length) throw new Error('no installer');
+  const source = join(desktop, 'release-artifacts', platformName);
+  const allowed = windows
+    ? ['Lumawb-Desktop-win32-x64-setup.exe', 'Lumawb-Desktop-win32-x64-setup.exe.sig']
+    : ['Lumawb-Desktop-darwin-arm64.app.zip', 'Lumawb-Desktop-darwin-arm64.app.tar.gz', 'Lumawb-Desktop-darwin-arm64.app.tar.gz.sig'];
   const checksums = await readFile(join(source, 'SHA256SUMS.txt'), 'utf8');
   const expected = new Map();
   for (const line of checksums.trim().split(/\r?\n/)) {
-    const match = /^([a-f0-9]{64})  ([^\\/]+\.exe)$/i.exec(line);
-    if (!match) throw new Error('invalid checksum manifest');
+    const match = /^([a-f0-9]{64})  ([A-Za-z0-9._-]+)$/.exec(line);
+    if (!match || !allowed.includes(match[2])) throw new Error('invalid checksum manifest');
     expected.set(match[2], match[1].toLowerCase());
   }
+  if (allowed.some(name => !expected.has(name))) throw new Error('missing installer or signed update file');
   await mkdir(output, { recursive: true });
-  for (const name of installers) {
+  for (const name of allowed) {
     const path = join(source, name);
-    if (!(await stat(path)).isFile()) throw new Error('not a regular installer');
+    if (!(await stat(path)).isFile()) throw new Error('not a regular file');
     const bytes = await readFile(path);
-    if (bytes[0] !== 0x4d || bytes[1] !== 0x5a) throw new Error('not a PE installer');
-    if (createHash('sha256').update(bytes).digest('hex') !== expected.get(name)) throw new Error('installer hash mismatch');
+    if (name.endsWith('.exe') && (bytes[0] !== 0x4d || bytes[1] !== 0x5a)) throw new Error('not a PE installer');
+    if (name.endsWith('.sig') && !/^[A-Za-z0-9+/=\s]+$/.test(bytes.toString('utf8'))) throw new Error('invalid update signature');
+    if (createHash('sha256').update(bytes).digest('hex') !== expected.get(name)) throw new Error('artifact hash mismatch');
     await copyFile(path, join(output, name));
   }
-  if (expected.size !== installers.length) throw new Error('unexpected manifest entry');
   await copyFile(join(source, 'SHA256SUMS.txt'), join(output, 'SHA256SUMS.txt'));
-  console.log(`Passed: ${phase}; ${installers.length} installer(s), checksums only.`);
+  console.log(`Passed: ${phase}; ${allowed.join(', ')}.`);
 } catch {
   await rm(output, { recursive: true, force: true });
   console.error(`Build failed during: ${phase}.`);

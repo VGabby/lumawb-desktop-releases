@@ -1,17 +1,40 @@
 # Lumawb installer builds
 
-This repository contains public build instructions only. Lumawb application source remains in the private `VGabby/lumawb-inference` repository. It publishes no source archives or compiler logs.
+This repository contains public build instructions and published installers only. Lumawb application source remains in the private `VGabby/lumawb-inference` repository. It publishes no source archives or compiler logs.
 
-## Windows build
+## Release build
 
-The workflow runs manually on the standard `windows-2022` GitHub-hosted runner. Standard runners for public repositories do not charge runner minutes. No larger runner, paid signing service, or paid hosting is configured. [GitHub billing documentation](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
+**Build release installers and signed updates** (`.github/workflows/release.yml`) runs manually on the standard `windows-2022` and `macos-14` (Apple Silicon) GitHub-hosted runners. Standard runners for public repositories do not charge runner minutes. No larger runner, paid signing service, or paid hosting is configured. [GitHub billing documentation](https://docs.github.com/en/billing/concepts/product-billing/github-actions)
 
-Before a build, the publisher adds a temporary **read-only deploy key** to the private source repository and stores its private half as the `windows-release` environment's `LUMAWB_SOURCE_DEPLOY_KEY` secret. Never commit or print the key. Remove the deploy key and secret after the build. Restrict the environment to the `main` branch, protect that branch, and allow only trusted maintainers to edit or dispatch this workflow; anyone who can change a secret-using workflow can potentially expose that secret.
+Before a build, the publisher adds a temporary **read-only deploy key** to the private source repository and stores its private half as the `windows-release` environment's `LUMAWB_SOURCE_DEPLOY_KEY` secret. Never commit or print the key. Remove the deploy key and secret after both jobs have checked out the source. The environment is restricted to the `main` branch; allow only trusted maintainers to edit or dispatch this workflow, because anyone who can change a secret-using workflow can potentially expose its secrets.
 
-Run **Build Windows installer** with the exact reviewed 40-character source commit from `release/lumawb-desktop`. The checkout uses the temporary SSH key, fetches the current release branch, verifies that its HEAD is the supplied commit, and does not persist credentials. The job runs model/reference parity, offline HTTP integration, and builds an unsigned NSIS installer with its required native runtime.
+Run the workflow with the exact reviewed 40-character source commit from `release/lumawb-desktop`. The checkout uses the temporary SSH key, verifies that the branch HEAD is the supplied commit, and does not persist credentials. Each job runs model/reference parity and offline HTTP integration, then builds the installer.
 
-Build commands write raw output only to temporary runner files, which are deleted. Public logs show phase names and success/failure summaries. On success, only validated `.exe` installers and `SHA256SUMS.txt` are copied to the uploaded artifact. Artifacts expire after one day; download them promptly. There are no push or pull-request triggers and no automatic release publication.
+## Update signing
 
-When a build fails, the artifact instead contains only `build-diagnostics.enc.json`. It holds the captured build logs, compressed and encrypted with a random AES-256-GCM key, which is itself encrypted with RSA-OAEP (SHA-256) to `diagnostics-public.pem`. The matching private key exists only on the publisher's local machine and is never stored in this repository, the runner, or GitHub, so nobody else can read the diagnostics, including anyone who downloads the artifact.
+The same environment holds `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, the Tauri updater (minisign) key. `scripts/build-release.mjs` removes both from its environment at start and passes them only to the installer build command, so dependency installs and tests never see them. Each job produces:
 
-The unsigned installer can show SmartScreen warnings. A Microsoft Store MSIX submission is a separate route requiring publisher enrollment and certification. This workflow does not buy a certificate, submit to the Store, install an application on a user's computer, or change billing settings.
+| Platform | Installer | Signed update file |
+| --- | --- | --- |
+| Windows x64 | `Lumawb-Desktop-win32-x64-setup.exe` | the same installer plus `.sig` |
+| Apple Silicon | `Lumawb-Desktop-darwin-arm64.app.zip` | `Lumawb-Desktop-darwin-arm64.app.tar.gz` plus `.sig` |
+
+The matching public key is built into the app, which refuses any update whose signature does not verify. The publisher keeps an offline backup of the private key; if it is lost, installed apps cannot accept future updates.
+
+## Publishing a release
+
+1. Download both artifacts (they expire after one day).
+2. Write the release notes and run `node scripts/make-latest.mjs --version X.Y.Z --notes notes.md --dir <artifacts> --out latest.json`.
+3. Create release `vX.Y.Z` as a normal release (not a prerelease) with both installers, the `.app.tar.gz`, both `.sig` files, `latest.json` and a combined `SHA256SUMS.txt`.
+
+Apps read `releases/latest/download/latest.json`, so the newest normal release must always contain `latest.json`, and every release needs a higher version.
+
+## Testing an update on Windows
+
+**Test Windows in-app update** (`.github/workflows/update-test-windows.yml`) needs no secrets. It installs an older release from its public installer, runs `Lumawb Desktop.exe --install-update` (the same steps as the in-app **Update** button), and passes only if the installed version becomes the expected one and the app restarts.
+
+## Logs and diagnostics
+
+Build commands write raw output only to temporary runner files, which are deleted. Public logs show phase names and success/failure summaries. When a build fails, the artifact instead contains only `build-diagnostics.enc.json`: the captured logs, compressed and encrypted with a random AES-256-GCM key, which is itself encrypted with RSA-OAEP (SHA-256) to `diagnostics-public.pem`. The matching private key exists only on the publisher's machine.
+
+The Windows installer is unsigned and can show SmartScreen warnings. Mac apps use ad hoc signing without notarization. This repository does not buy certificates or change billing settings.

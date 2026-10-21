@@ -1,0 +1,63 @@
+name: Test Windows in-app update
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_tag:
+        description: 'Release tag to install first, for example v0.2.0'
+        required: true
+        type: string
+      expected_version:
+        description: 'Version the in-app updater must install, for example 0.2.1'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Install the older release from its public installer
+        shell: pwsh
+        env:
+          FROM_TAG: ${{ inputs.from_tag }}
+        run: |
+          if ($env:FROM_TAG -notmatch '^v\d+\.\d+\.\d+$') { throw 'invalid tag' }
+          $url = "https://github.com/VGabby/lumawb-desktop-releases/releases/download/$env:FROM_TAG/Lumawb-Desktop-win32-x64-setup.exe"
+          Invoke-WebRequest $url -OutFile "$env:RUNNER_TEMP\setup.exe"
+          Start-Process "$env:RUNNER_TEMP\setup.exe" -ArgumentList '/S' -Wait
+      - name: Report installed version
+        id: before
+        shell: pwsh
+        run: |
+          $entry = Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall | Get-ItemProperty | Where-Object DisplayName -like 'Lumawb*'
+          if (-not $entry) { throw 'Lumawb is not installed' }
+          "Installed: $($entry.DisplayName) $($entry.DisplayVersion) at $($entry.InstallLocation)"
+          "location=$($entry.InstallLocation.Trim('"'))" >> $env:GITHUB_OUTPUT
+      - name: Run the in-app updater (same code path as the Update button)
+        shell: pwsh
+        env:
+          INSTALL_DIR: ${{ steps.before.outputs.location }}
+          EXPECTED: ${{ inputs.expected_version }}
+        run: |
+          if ($env:EXPECTED -notmatch '^\d+\.\d+\.\d+$') { throw 'invalid version' }
+          $exe = Get-ChildItem $env:INSTALL_DIR -Filter *.exe | Where-Object { $_.Name -notmatch 'uninstall|lumawb-api' } | Select-Object -First 1
+          "Starting $($exe.FullName) --install-update"
+          Start-Process $exe.FullName -ArgumentList '--install-update'
+          $deadline = (Get-Date).AddMinutes(10)
+          do {
+            Start-Sleep -Seconds 10
+            $entry = Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall | Get-ItemProperty | Where-Object DisplayName -like 'Lumawb*'
+            "Installed version: $($entry.DisplayVersion)"
+          } until ($entry.DisplayVersion -eq $env:EXPECTED -or (Get-Date) -gt $deadline)
+          if ($entry.DisplayVersion -ne $env:EXPECTED) { throw "Update did not install $env:EXPECTED" }
+          $exe = Get-ChildItem $env:INSTALL_DIR -Filter *.exe | Where-Object { $_.Name -notmatch 'uninstall|lumawb-api' } | Select-Object -First 1
+          "File version: $($exe.VersionInfo.ProductVersion)"
+          Start-Sleep -Seconds 20
+          $running = Get-Process | Where-Object { $_.Path -eq $exe.FullName }
+          if (-not $running) { throw 'Lumawb did not restart after the update' }
+          "Restarted after update: process $($running.Id)"
+          $running | Stop-Process -Force
