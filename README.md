@@ -8,7 +8,9 @@ This repository contains public build instructions and published installers only
 
 Before a build, the publisher adds a temporary **read-only deploy key** to the private source repository and stores its private half as the `windows-release` environment's `LUMAWB_SOURCE_DEPLOY_KEY` secret. Never commit or print the key. Remove the deploy key and secret after both jobs have checked out the source. The environment is restricted to the `main` branch; allow only trusted maintainers to edit or dispatch this workflow, because anyone who can change a secret-using workflow can potentially expose its secrets.
 
-Run the workflow with the exact reviewed 40-character source commit from `release/lumawb-desktop`. The checkout uses the temporary SSH key, verifies that the branch HEAD is the supplied commit, and does not persist credentials. Each job runs model/reference parity and offline HTTP integration, then builds the installer.
+Run the workflow with the exact reviewed 40-character source commit from `release/lumawb-desktop`. The checkout uses the temporary SSH key, verifies that the branch HEAD is the supplied commit, and does not persist credentials. Each job builds the installer. Tests (core tests, Python reference parity, offline HTTP integration and the Windows GPU diagnostic) are opt-in with the `run_tests` input; the publisher runs them locally before each release commit.
+
+Swatinem/rust-cache caches compiled third-party Rust dependencies and the Cargo registry per platform, keyed by `Cargo.lock`. Lumawb's own crate is not cached. After the first run, builds reuse the cache. Caches stay within GitHub's free 10 GB per-repository limit and expire after 7 days unused. This repository has no pull-request workflows, so forks cannot run a workflow that reads the cache without maintainer approval.
 
 ## Update signing
 
