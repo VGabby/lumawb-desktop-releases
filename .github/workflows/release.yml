@@ -26,9 +26,12 @@ jobs:
           - os: windows-2022
             platform: win32-x64
             target: x86_64-pc-windows-msvc
+            # Windows tar.exe must win over Git's tar, which reads C: as a host.
+            shell: pwsh
           - os: macos-14
             platform: darwin-arm64
             target: aarch64-apple-darwin
+            shell: bash
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     env:
@@ -60,7 +63,7 @@ jobs:
           toolchain: '1.88.0'
           targets: ${{ matrix.target }}
       - name: Validate, test, build and sign updates without exposing compiler output
-        shell: bash
+        shell: ${{ matrix.shell }}
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
