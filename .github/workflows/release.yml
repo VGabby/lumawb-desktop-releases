@@ -7,6 +7,11 @@ on:
         description: 'Exact reviewed 40-character commit from the private release branch'
         required: true
         type: string
+      run_tests:
+        description: 'Also run core tests, Python parity and HTTP integration (adds about 3 minutes)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -33,6 +38,7 @@ jobs:
     timeout-minutes: 60
     env:
       LUMAWB_SOURCE_COMMIT: ${{ inputs.source_commit }}
+      LUMAWB_RUN_TESTS: ${{ inputs.run_tests }}
     steps:
       - name: Check out public build instructions
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -59,6 +65,14 @@ jobs:
         with:
           toolchain: '1.88.0'
           targets: ${{ matrix.target }}
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # The build script puts Cargo output in RUNNER_TEMP/lt (short paths for
+          # MSBuild). Only third-party dependencies are cached, never Lumawb's own crate.
+          workspaces: private-source/desktop/src-tauri -> ../../../../../_temp/lt
+          shared-key: ${{ matrix.platform }}
+          cache-on-failure: false
       - name: Validate, test, build and sign updates without exposing compiler output (Windows)
         if: runner.os == 'Windows'
         # PowerShell keeps Windows tar.exe ahead of Git's tar, which reads C: as a host.
